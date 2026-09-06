@@ -24,6 +24,7 @@ from ocrmypdf_appleocr.livetext import (
 )
 from ocrmypdf_appleocr.ocr_tree import build_ocr_tree
 from ocrmypdf_appleocr.pdf import generate_pdf
+from ocrmypdf_appleocr.textfix import fix_text
 from ocrmypdf_appleocr.vision import (
     ocr_VNRecognizeTextRequest,
     supported_languages_accurate,
@@ -64,6 +65,11 @@ def perform_ocr(image: Path, options) -> tuple[list[Textbox], int, int, tuple[in
     else:
         textboxes = ocr_VNRecognizeTextRequest(image, width, height, options)
 
+    # Only fix whole-line text here. `children` are per-glyph/syllable pieces on
+    # CJK text (see pdf.py's word-grouping), so a word-level heuristic like the
+    # standalone "l" -> "I" fix would misfire on individual letters; it is applied
+    # after regrouping into real words instead, in pdf.py's `_word_runs`.
+    textboxes = [tb._replace(text=fix_text(tb.text)) for tb in textboxes]
     return textboxes, width, height, dpi
 
 
