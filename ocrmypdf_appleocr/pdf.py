@@ -20,6 +20,7 @@ from pikepdf import (
 )
 
 from ocrmypdf_appleocr.common import Textbox, log
+from ocrmypdf_appleocr.textfix import fix_text
 
 TEXT_POSITION_DEBUG = False
 GLYPHLESS_FONT = importlib.resources.read_binary("ocrmypdf_appleocr", "pdf.ttf")
@@ -272,15 +273,50 @@ def _word_runs(
             text,
         )
 
+    # Apple's LiveText "word" children are not always real words: for CJK text
+    # (Korean included) it hands back one child per syllable/character. Whether or
+    # not it also emits an explicit whitespace-only child at a word boundary is not
+    # a reliable signal by itself (English words get no such marker at all, just a
+    # visible gap). What is reliable is the geometry: glyphs belonging to the same
+    # word sit flush against each other (near-zero gap), while an actual word or
+    # space boundary leaves a gap comparable to the glyph height. Group consecutive
+    # non-whitespace children into one run whenever the gap between them is small
+    # relative to their height, so a space is only rendered at real boundaries
+    # instead of after every glyph.
+    # Measured empirically: same-word glyph adjacency reports gap/height == 0.000,
+    # real word/space boundaries (Korean and English both) report ~0.125. Split the
+    # difference so float noise on either side doesn't misclassify.
+    GAP_RATIO = 0.06
+    content = [c for c in children if c.text.strip() != ""]
+    groups: list[tuple] = []  # (start_bb, end_bb, text)
+    cur_text = ""
+    cur_start = None
+    cur_end = None
+    for child in content:
+        bb = child.bb
+        if cur_end is not None:
+            gap = bb.ll.x - cur_end.lr.x
+            ref_height = max(cur_end.true_height(), bb.true_height())
+            if ref_height > 0 and gap > ref_height * GAP_RATIO:
+                groups.append((cur_start, cur_end, cur_text))
+                cur_text, cur_start = "", None
+        if cur_start is None:
+            cur_start = bb
+        cur_end = bb
+        cur_text += child.text
+    if cur_text:
+        groups.append((cur_start, cur_end, cur_text))
+
     words = []
-    for word in children:
-        wtext = word.text.strip()
-        wbb = word.bb
-        wwidth = wbb.true_width() * scale[0]
+    for start_bb, end_bb, wtext in groups:
+        # Safe to apply the word-level fix here: each group is now a real,
+        # fully-assembled word (or punctuation run), not an isolated glyph.
+        wtext = fix_text(wtext)
+        wwidth = (end_bb.lr.x - start_bb.ll.x) * scale[0]
         if len(wtext) == 0 or wwidth <= 0:
             continue
-        wx = wbb.ll.x * scale[0]
-        wy = (height - wbb.ll.y) * scale[1]
+        wx = start_bb.ll.x * scale[0]
+        wy = (height - start_bb.ll.y) * scale[1]
         words.append(((wx - ox) * cos_a + (wy - oy) * sin_a, wwidth, wtext))
 
     runs = []
